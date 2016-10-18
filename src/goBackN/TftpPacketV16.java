@@ -1,4 +1,4 @@
-package project;
+package goBackN;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -28,7 +28,7 @@ import java.util.Map;
  * tftp request packet
  *          2 bytes   string   1 byte  string   1 byte   optional options (strings)
  *          -----------------------------------------+ - - - + - + - - - + - + ->
- * RRQ/WRQ | 01/02 | Filename |  0  |   Mode   |  0  |  opproject | 0 | value1| 0 | ...
+ * RRQ/WRQ | 01/02 | Filename |  0  |   Mode   |  0  |  opt1 | 0 | value1| 0 | ...
  *          -----------------------------------------+ - - - + - + - - - + - + ->
  *       Modes (ascii chars/1 byte each):
  *               "netascii", "octet",...
