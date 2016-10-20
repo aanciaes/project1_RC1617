@@ -33,7 +33,7 @@ public class FTUdpServer implements Runnable {
 
     public static final int DEFAULT_PORT = 10512; // my default port
     private static final String[] ACCEPTED_OPTIONS = new String[] { "blksize" };
-    private static final int DEFAULT_WINDOW_SIZE = 5; // by default stop and
+    private static final int DEFAULT_WINDOW_SIZE = 1; // by default stop and
     // wait
     private static final int DEFAULT_TRANSFER_TIMEOUT = 10000;
 

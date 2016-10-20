@@ -33,7 +33,10 @@ public class FTUdpClient {
 	private BlockingQueue<TftpPacketV16> receiverQueue;
 	volatile private SocketAddress srvAddress;
 	
-	private List<Long> sentPackages;
+	//Saves all packets inside the window that have already been sent
+	private List<Long> sentPackets;
+	
+	//Represents the client side window
 	private SortedMap<Long, TftpPacketV16> window;
 	long byteCount = 1; // block byte count starts at 1
 
@@ -41,13 +44,12 @@ public class FTUdpClient {
 		this.filename = filename;
 		this.srvAddress = srvAddress;
 		window = new TreeMap <Long, TftpPacketV16>();
-		sentPackages = new ArrayList<Long>(WindowSize);
+		sentPackets = new ArrayList<Long>(WindowSize);	//Array list with same size as the window
 	}
 
 	void sendFile() {
 		try {
 
-			// socket = new MyDatagramSocket();
 			socket = new DatagramSocket();
 
 			// create producer/consumer queue for ACKs
@@ -83,28 +85,37 @@ public class FTUdpClient {
 
 				FileInputStream f = new FileInputStream(filename);
 
+				//Initial free space is equal to window size -- No packets in the window initially
 				int freeSpace = WindowSize;
 
-				while (f.available()>0 || !window.isEmpty()) {
+				while (f.available()>0 || !window.isEmpty()) { //While there is file to be read or window is not empty
 					
-					freeSpace = fillWindow(freeSpace, f);	//Since fillWindow fills all the freeSlots, it just sets freeSpace to 0
+					//Since fillWindow fills all the freeSlots, it just sets freeSpace to 0
+					freeSpace = fillWindow(freeSpace, f);
 					
-					sendDataFromWindow();
+					sendDataFromWindow(); //Send all data from window
 					TftpPacketV16 ack = receiverQueue.poll(Timeout, TimeUnit.MILLISECONDS);
 					System.err.println(">>>> got: " + ack);
 					if (ack != null)
 						if (ack.getOpcode() == OP_ACK)
-							if (window.containsKey(ack.getCurrentSeqN())) {
+							if (window.containsKey(ack.getCurrentSeqN())) { 	//Acknowledge received is inside the window
+								
+								 //stats.newTimeoutMeasure(System.currentTimeMillis() - sendTime);
+								
+								//slide window
 								freeSpace = handleSliding(ack.getCurrentSeqN());
 								
 							} else {
+								//wrong acknowledge
 								System.err.println("wrong ack ignored, block= " + ack.getSeqN());
 							}
 						else {
 							System.err.println("error +++ (unexpected packet)");
 						}
 					else {
+						//Timeout expired. Clear all data from sent packets to send them again
 						System.err.println("timeout...");
+						sentPackets.clear();
 					}
 				}
 				f.close();
@@ -122,15 +133,21 @@ public class FTUdpClient {
 		stats.printReport();
 	}
 
+	/**
+	 * Handles the slide of the window after receiving an acknowledge
+	 * @param currentSeqN The acknowledge received
+	 * @return Free spaces in the window after sliding
+	 */
 	private int handleSliding(long currentSeqN) {
 		// TODO Auto-generated method stub
 		int x = 0;
 		int freeSpaces = 0;
-		while(x < sentPackages.size()){
+		while(x < sentPackets.size()){
 	
-			if(currentSeqN >= sentPackages.get(x)){
-				window.remove(sentPackages.get(x));
-				sentPackages.remove(x);
+			if(currentSeqN >= sentPackets.get(x)){ 
+				//acknowledge received, packet can be deleted from window
+				window.remove(sentPackets.get(x));
+				sentPackets.remove(x);
 			
 				freeSpaces++;
 			}
@@ -139,6 +156,12 @@ public class FTUdpClient {
 		return freeSpaces;
 	}
 
+	/**
+	 * Reads data from the file and fills the free spaces on the window with data from the file
+	 * @param freeSpace Number of free spaces in available on the window
+	 * @param file File to be read and transfered to the server
+	 * @return The number of free spaces left in the window after filling the window. Normally it returns 0, cause it fills all free spaces
+	 */
 	private int fillWindow(int freeSpace, FileInputStream file) {
 		// TODO Auto-generated method stub
 
@@ -150,8 +173,9 @@ public class FTUdpClient {
 
 			while (i < freeSpace) {
 			
+				//Reads data from the file into the buffer
 				if ((n = file.read(buffer)) > 0) {
-				
+					//Creates a new packet and stores it in the window
 					TftpPacketV16 pkt = new TftpPacketV16().putShort(OP_DATA).putLong(byteCount).putBytes(buffer, n);
 					window.put(byteCount, pkt);
 					byteCount += n;
@@ -165,22 +189,25 @@ public class FTUdpClient {
 		return free;
 	}
 
+	/**
+	 * Sends packets that have not yet been sent in this current timeout
+	 * @throws IOException
+	 */
 	public void sendDataFromWindow() throws IOException{
-
-		
 		
 		for(Long seq : window.keySet()) {
 			TftpPacketV16 pkt = window.get(seq);
 
 			
-			if(!sentPackages.contains(seq)){
+			if(!sentPackets.contains(seq)){
 				
 				System.err.println("sending: " + seq + " expecting:" + (seq + pkt.getLength()));
 				socket.send(new DatagramPacket(pkt.getPacketData(), pkt.getLength(), srvAddress));
-				sentPackages.add(seq);
+				sentPackets.add(seq);
 				
+				//Stats
+				stats.newPacketSent(pkt.getLength());
 			}
-			
 		}
 	}
 
