@@ -23,28 +23,39 @@ import java.util.concurrent.TimeUnit;
 public class FTUdpClient {
 	static final int DEFAULT_TIMEOUT = 1000;
 	static final int DEFAULT_MAX_RETRIES = 7;
-	static int WindowSize; 
 	static int BlockSize = DEFAULT_BLOCK_SIZE;
 	static int Timeout = DEFAULT_TIMEOUT;
+	private static int staticWindowSize;
 
+	private int WindowSize; 
 	private String filename;
 	private Stats stats;
 	private DatagramSocket socket;
 	private BlockingQueue<TftpPacketV16> receiverQueue;
 	volatile private SocketAddress srvAddress;
-	
+
 	//Saves all packets inside the window that have already been sent
 	private List<Long> sentPackets;
-	
+	private List<Long> sentPacketsTime;
+
 	//Represents the client side window
 	private SortedMap<Long, TftpPacketV16> window;
 	long byteCount = 1; // block byte count starts at 1
+
+	private int windowUpdateCounter = 1; //Ajustable window size
+
+	//ajustable Timeout
+	private long allPropagationTime;
+	private long numACKS;
 
 	FTUdpClient(String filename, SocketAddress srvAddress) {
 		this.filename = filename;
 		this.srvAddress = srvAddress;
 		window = new TreeMap <Long, TftpPacketV16>();
-		sentPackets = new ArrayList<Long>(WindowSize);	//Array list with same size as the window
+		WindowSize = staticWindowSize;
+
+		sentPackets = new ArrayList<Long>(WindowSize);//Array list with same size as the window
+		sentPacketsTime = new ArrayList<Long>(WindowSize);
 	}
 
 	void sendFile() {
@@ -89,43 +100,80 @@ public class FTUdpClient {
 				int freeSpace = WindowSize;
 
 				while (f.available()>0 || !window.isEmpty()) { //While there is file to be read or window is not empty
-					
+
 					//Since fillWindow fills all the freeSlots, it just sets freeSpace to 0
 					freeSpace = fillWindow(freeSpace, f);
-					
+
 					sendDataFromWindow(); //Send all data from window
+
 					TftpPacketV16 ack = receiverQueue.poll(Timeout, TimeUnit.MILLISECONDS);
 					System.err.println(">>>> got: " + ack);
 					if (ack != null)
 						if (ack.getOpcode() == OP_ACK)
-							if (window.containsKey(ack.getCurrentSeqN())) { 	//Acknowledge received is inside the window
-								
-								 //stats.newTimeoutMeasure(System.currentTimeMillis() - sendTime);
-								
-								//slide window
-								freeSpace = handleSliding(ack.getCurrentSeqN());
-								
-							} else {
-								//wrong acknowledge
-								System.err.println("wrong ack ignored, block= " + ack.getSeqN());
+							if(ack.getCurrentSeqN()!=-1){
+								if (window.containsKey(ack.getCumulativeSeqN())) { 	//Acknowledge received is inside the window
+
+									//ajustable Timeout
+									numACKS++;
+									for(int i = 0; i<sentPackets.size();i++){
+										if(sentPackets.get(i) == ack.getCumulativeSeqN()){
+											ajustTimeout(sentPacketsTime.get(i));
+											break;
+										}
+									} //Ajustable Timeout
+
+									//slide window
+									freeSpace = handleSliding(ack.getCumulativeSeqN());
+									windowUpdateCounter++;
+
+									if(windowUpdate() ){	//If there was an update on the window size
+										freeSpace++;
+										List<Long> tmp = sentPackets;
+
+										//Resize Lists
+										sentPackets = new ArrayList<Long>(WindowSize);
+										sentPackets.addAll(tmp);
+										List<Long> tmp2 = sentPacketsTime;
+										sentPacketsTime = new ArrayList<Long>(WindowSize);
+										sentPacketsTime.addAll(tmp2);
+									}
+
+								} else {
+									//wrong acknowledge
+									windowUpdateCounter = 1; //Error --> Reset Window counter
+									System.err.println("wrong ack ignored, block= " + ack.getSeqN());
+								}
+							}else{
+								sentPackets.clear(); //Clear all sent packets
+								System.out.println("Packet Lost");
+
 							}
 						else {
+							windowUpdateCounter = 1;//Error --> Reset Window counter
 							System.err.println("error +++ (unexpected packet)");
 						}
 					else {
 						//Timeout expired. Clear all data from sent packets to send them again
+						windowUpdateCounter = 1;
 						System.err.println("timeout...");
-						sentPackets.clear();
+						//Resize window
+						WindowSize = staticWindowSize;
+						freeSpace=0;
+						sentPackets = new ArrayList<Long>(WindowSize);
+
+						//stats
+						sentPacketsTime = new ArrayList<Long>(WindowSize);
 					}
 				}
 				f.close();
 
 			} catch (Exception e) {
 				System.err.println("failed with error \n" + e.getMessage());
+				e.printStackTrace();
 				System.exit(0);
 			}
 			socket.close();
-			System.out.println("Done bitch...");
+			System.out.println("Done...");
 		} catch (Exception x) {
 			x.printStackTrace();
 			System.exit(0);
@@ -134,24 +182,50 @@ public class FTUdpClient {
 	}
 
 	/**
+	 * Updates the window size
+	 * @return true if the window size was updated
+	 */
+	private boolean windowUpdate(){
+
+		if(WindowSize >= 29){
+			return false;
+		}
+		if(windowUpdateCounter >= 3){
+
+			WindowSize++;
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Handles the slide of the window after receiving an acknowledge
 	 * @param currentSeqN The acknowledge received
 	 * @return Free spaces in the window after sliding
 	 */
-	private int handleSliding(long currentSeqN) {
-		// TODO Auto-generated method stub
+	private int handleSliding(long seqNumber) {
+
 		int x = 0;
 		int freeSpaces = 0;
 		while(x < sentPackets.size()){
-	
-			if(currentSeqN >= sentPackets.get(x)){ 
+
+			if(seqNumber >= sentPackets.get(x)){ 
 				//acknowledge received, packet can be deleted from window
+				stats.newPacketSent(window.get(sentPackets.get(x)).getBlockData().length);
 				window.remove(sentPackets.get(x));
 				sentPackets.remove(x);
-			
 				freeSpaces++;
+
+				//stats
+				stats.newTimeoutMeasure(System.currentTimeMillis() - sentPacketsTime.get(x));
+				sentPacketsTime.remove(x);
+
 			}
 			x++;
+		}
+		//If after the window resizing, the packets are already loaded into memory
+		if(window.size() > WindowSize){
+			return 0;
 		}
 		return freeSpaces;
 	}
@@ -163,22 +237,20 @@ public class FTUdpClient {
 	 * @return The number of free spaces left in the window after filling the window. Normally it returns 0, cause it fills all free spaces
 	 */
 	private int fillWindow(int freeSpace, FileInputStream file) {
-		// TODO Auto-generated method stub
 
 		int i = 0;
 		int n;
 		int free = freeSpace;
 		byte[] buffer = new byte[BlockSize];
 		try {
-
 			while (i < freeSpace) {
-			
 				//Reads data from the file into the buffer
-				if ((n = file.read(buffer)) > 0) {
+				if ((n = file.read(buffer)) > 0 ) {
 					//Creates a new packet and stores it in the window
 					TftpPacketV16 pkt = new TftpPacketV16().putShort(OP_DATA).putLong(byteCount).putBytes(buffer, n);
-					window.put(byteCount, pkt);
 					byteCount += n;
+					window.put(byteCount, pkt);
+
 					free--;
 				}
 				i++;
@@ -194,22 +266,40 @@ public class FTUdpClient {
 	 * @throws IOException
 	 */
 	public void sendDataFromWindow() throws IOException{
-		
+		int counter = 0;
 		for(Long seq : window.keySet()) {
 			TftpPacketV16 pkt = window.get(seq);
-
-			
+			counter++;
 			if(!sentPackets.contains(seq)){
-				
-				System.err.println("sending: " + seq + " expecting:" + (seq + pkt.getLength()));
+
+				System.err.println("sending: " + (seq - pkt.getPacketData().length) + " expecting:" + (seq));
 				socket.send(new DatagramPacket(pkt.getPacketData(), pkt.getLength(), srvAddress));
 				sentPackets.add(seq);
-				
+
 				//Stats
-				stats.newPacketSent(pkt.getLength());
+				sentPacketsTime.add(System.currentTimeMillis());
+
+
+			}
+			if(counter == WindowSize){
+				break;
 			}
 		}
 	}
+
+	/**
+	 * Adjusts the timeout
+	 * @param time time of the received acknowledge
+	 */
+	public void ajustTimeout (long time){
+
+		allPropagationTime += (System.currentTimeMillis() - time);
+
+		Timeout = (int)(allPropagationTime/numACKS + 20);
+		System.out.println("Timeout = " + Timeout);
+
+	}
+
 
 	/*
 	 * Send a block to the server, repeating until the expected ACK is received,
@@ -258,9 +348,9 @@ public class FTUdpClient {
 			startTime = System.currentTimeMillis();
 		}
 
-		void newPacketSent(int n) {
+		void newPacketSent(long x) {
 			totalPackets++;
-			totalBytes += n;
+			totalBytes += x;
 		}
 
 		void newTimeoutMeasure(long t) {
@@ -280,6 +370,7 @@ public class FTUdpClient {
 			System.out.printf("End-to-end transfer time:\t%.3f s\n", (float) milliSeconds / 1000);
 			System.out.printf("End-to-end transfer speed:\t%.3f M bps\n", speed);
 			System.out.printf("Average rtt:\t\t\t%.3f ms\n", averageRtt);
+			System.out.println("Average Timeout: " + Timeout);
 			System.out.printf("Sending window size:\t\t%d packet(s)\n\n", window);
 		}
 	}
@@ -292,12 +383,18 @@ public class FTUdpClient {
 				// By the moment this parameter is ignored and the client
 				// WindowSize
 				// is always equal to 1 (stop and wait)
-				WindowSize = Integer.parseInt(args[4]);
+				staticWindowSize = Integer.parseInt(args[4]);
 			case 4:
+				staticWindowSize=5;
 				Timeout = Integer.valueOf(args[3]);
 			case 3:
+				staticWindowSize=5;
+				Timeout=1000;
 				BlockSize = Integer.valueOf(args[2]);
 			case 2:
+				staticWindowSize = 5;
+				Timeout=1000;
+				BlockSize=512;
 				break;
 			default:
 				throw new Exception("bad parameters");
